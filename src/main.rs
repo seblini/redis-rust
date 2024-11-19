@@ -1,33 +1,37 @@
 #![allow(unused_imports)]
 use std::collections::HashMap;
 use std::str::from_utf8;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 enum CMD {
     PING,
     ECHO(String),
-    SET(String, String),
+    SET(String, String, Option<Instant>),
     GET(String),
 }
 
 impl CMD {
-    pub fn response(self, env: &HashMap<String, String>) -> String {
+    pub fn response(self, env: &HashMap<String, (String, Option<Instant>)>) -> String {
         match self {
             CMD::PING => "+PONG\r\n".to_string(),
             CMD::ECHO(msg) => format!("+{}\r\n", msg),
             CMD::SET(..) => "+OK\r\n".to_string(),
             CMD::GET(key) => match env.get(&key) {
-                Some(val) => format!("${}\r\n{}\r\n", val.len(), val),
-                None => "$-1\r\n".to_string(),
+                Some((val, None)) => format!("${}\r\n{}\r\n", val.len(), val),
+                Some((val, Some(expiry))) if Instant::now() < *expiry => {
+                    format!("${}\r\n{}\r\n", val.len(), val)
+                }
+                _ => "$-1\r\n".to_string(),
             },
         }
     }
 
-    pub fn run(&self, env: &mut HashMap<String, String>) {
+    pub fn run(&self, env: &mut HashMap<String, (String, Option<Instant>)>) {
         match self {
-            CMD::SET(key, value) => {
-                env.insert(key.clone(), value.clone());
+            CMD::SET(key, value, expiry) => {
+                env.insert(key.clone(), (value.clone(), expiry.clone()));
             }
             _ => {}
         };
@@ -51,7 +55,7 @@ async fn main() {
 
 async fn handle_conn(mut stream: TcpStream) {
     let mut buf: [u8; 256] = [0; 256];
-    let mut env: HashMap<String, String> = HashMap::new();
+    let mut env: HashMap<String, (String, Option<Instant>)> = HashMap::new();
 
     loop {
         let bytes_read: usize = stream.read(&mut buf).await.unwrap();
@@ -69,7 +73,15 @@ fn resp_deserialize(resp: &str) -> CMD {
     match args[2] {
         "PING" => CMD::PING,
         "ECHO" => CMD::ECHO(args[4].to_string()),
-        "SET" => CMD::SET(args[4].to_string(), args[6].to_string()),
+        "SET" => CMD::SET(
+            args[4].to_string(),
+            args[6].to_string(),
+            if args.len() > 8 && args[8].to_lowercase() == "px" {
+                Some(Instant::now() + Duration::from_millis(args[10].parse::<u64>().unwrap()))
+            } else {
+                None
+            },
+        ),
         "GET" => CMD::GET(args[4].to_string()),
         _ => panic!("Unknown Command"),
     }
